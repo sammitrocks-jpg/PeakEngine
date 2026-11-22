@@ -1,0 +1,92 @@
+name: Build Peak Engine (macOS)
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [ main, master ]
+
+jobs:
+  build-macos:
+    name: Build PeakEditor (macOS Apple Silicon / Metal)
+    runs-on: macos-15
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Clone upstream Wicked Engine
+        run: |
+          git clone --depth 1 https://github.com/turanszkij/WickedEngine.git PeakEngine
+
+      - name: Apply Peak Engine Overhaul
+        run: |
+          if [ -f "PeakEngine_Overhaul_Bundle.zip" ]; then
+            unzip -q -o PeakEngine_Overhaul_Bundle.zip
+            python3 peak_engine_overlay/apply_peak_overhaul.py --target ./PeakEngine
+          else
+            python3 - << 'PYEOF'
+          import re
+          from pathlib import Path
+          repo = Path("PeakEngine")
+          for rel in ["Editor", "Samples/Template_MacOS", "Samples/Template_Windows", "Samples/Template_Linux"]:
+              d = repo / rel
+              if not d.exists(): continue
+              for f in d.rglob("*"):
+                  if f.is_file() and f.suffix.lower() in {".h",".hpp",".cpp",".mm",".plist"}:
+                      lines = f.read_text(encoding="utf-8", errors="ignore").splitlines(keepends=True)
+                      out, changed = [], False
+                      for ln in lines:
+                          lo = ln.lower()
+                          if "copyright" in lo or "license" in lo or '#include "wickedengine.h"' in lo:
+                              out.append(ln); continue
+                          u = re.sub(r'"Wicked Engine([^"]*)"', r'"Peak Engine\1"', ln)
+                          u = re.sub(r'"WickedEngine([^"]*)"', r'"Peak Engine\1"', u)
+                          if u != ln: changed = True
+                          out.append(u)
+                      if changed: f.write_text("".join(out), encoding="utf-8")
+          init_cpp = repo / "WickedEngine" / "wiInitializer.cpp"
+          if init_cpp.exists():
+              t = init_cpp.read_text(encoding="utf-8", errors="ignore")
+              t = t.replace("Initializing Wicked Engine, please wait...", "Initializing Peak Engine (Vryn Studios), please wait...")
+              t = t.replace("Wicked Engine Initialized", "Peak Engine Initialized")
+              init_cpp.write_text(t, encoding="utf-8")
+          editor_cpp = repo / "Editor" / "Editor.cpp"
+          if editor_cpp.exists():
+              t = editor_cpp.read_text(encoding="utf-8", errors="ignore")
+              t = t.replace("infoDisplay.watermark = true;", "infoDisplay.watermark = false;")
+              editor_cpp.write_text(t, encoding="utf-8")
+          PYEOF
+          fi
+
+      - name: Compile Offline Shader Compiler (Metal)
+        working-directory: PeakEngine
+        run: |
+          xcodebuild clean build -project WickedEngine/offlineshadercompiler.xcodeproj -scheme offlineshadercompiler -configuration Release
+
+      - name: Generate Embedded Metal Shader Dump
+        working-directory: PeakEngine
+        run: |
+          BUILD_PATH="$(xcodebuild -project WickedEngine/offlineshadercompiler.xcodeproj -scheme offlineshadercompiler -configuration Release -showBuildSettings | grep -m 1 "BUILT_PRODUCTS_DIR" | awk -F' = ' '{print $2}')"
+          cd WickedEngine
+          "${BUILD_PATH}/offlineshadercompiler" metal rebuild shaderdump
+
+      - name: Build PeakEditor (macOS Metal)
+        working-directory: PeakEngine
+        run: |
+          xcodebuild clean build -project Editor/Editor.xcodeproj -scheme Editor -configuration Release
+
+      - name: Package PeakEditor for macOS
+        working-directory: PeakEngine
+        run: |
+          BUILD_PATH="$(xcodebuild -project Editor/Editor.xcodeproj -scheme Editor -configuration Release -showBuildSettings | grep -m 1 "BUILT_PRODUCTS_DIR" | awk -F' = ' '{print $2}')"
+          mkdir -p ../PeakEditor_macOS
+          cp -R "${BUILD_PATH}/Editor" ../PeakEditor_macOS/PeakEditor
+          chmod +x ../PeakEditor_macOS/PeakEditor
+          cp -R Editor/config.ini Editor/startup.lua Editor/languages Editor/fonts ../PeakEditor_macOS/ 2>/dev/null || true
+
+      - name: Upload Ready-to-Run PeakEditor (macOS)
+        uses: actions/upload-artifact@v4
+        with:
+          name: PeakEditor-macOS
+          path: PeakEditor_macOS/
+          retention-days: 30
